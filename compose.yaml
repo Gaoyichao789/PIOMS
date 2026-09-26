@@ -1,0 +1,83 @@
+# Compose项目名称。
+# 容器、网络和数据卷通常都会使用pioms作为名称前缀。
+name: pioms
+
+# 定义项目中需要运行的服务。
+services:
+
+  # 服务名称。
+  # 以后其他容器可以用mysql这个名字找到它。
+  mysql:
+
+    # 使用MySQL官方8.4镜像。
+    # 本地没有时，Docker会从镜像仓库下载。
+    image: mysql:8.4
+
+    # 传递给MySQL容器的环境变量。
+    environment:
+
+      # 设置MySQL root管理员的密码。
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+
+      # 第一次初始化时自动创建这个数据库。
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+
+      # 第一次初始化时自动创建普通应用用户。
+      MYSQL_USER: ${MYSQL_USER}
+
+      # 上面普通应用用户的密码。
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+
+      # 容器内部使用上海时区。
+      TZ: Asia/Shanghai
+
+    # 把容器端口发布到Windows。
+    ports:
+
+      # Windows的3307转发到容器的3306。
+      # MYSQL_PORT从.env读取。
+      - "${MYSQL_PORT}:3306"
+
+    # 数据持久化挂载。
+    volumes:
+
+      # 将名为mysql_data的数据卷挂载到MySQL的数据目录。
+      - mysql_data:/var/lib/mysql
+
+    # 给MySQL镜像默认启动命令添加参数。
+    command:
+
+      # 使用完整UTF-8字符集。
+      - --character-set-server=utf8mb4
+
+      # 设置默认排序和比较规则。
+      - --collation-server=utf8mb4_0900_ai_ci
+
+    # 定义如何判断MySQL是否真的可以提供服务。
+    healthcheck:
+
+      # 在容器内部执行的检查命令。
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent",
+        ]
+
+      # 每5秒检查一次。
+      interval: 5s
+
+      # 单次检查最多等待5秒。
+      timeout: 5s
+
+      # 连续失败20次后标记为unhealthy。
+      retries: 20
+
+      # 启动后的前20秒作为初始化时间。
+      start_period: 20s
+
+# 声明Compose管理的数据卷。
+volumes:
+
+  # 保存MySQL数据库文件。
+  # 重建容器时，这个数据卷仍然存在。
+  mysql_data:
