@@ -75,6 +75,26 @@ services:
       # 启动后的前20秒作为初始化时间。
       start_period: 20s
 
+  # Redis只用作可丢失、可重建的缓存，不是订单和库存的最终数据源。
+  redis:
+
+    # 使用Redis官方7.4轻量Alpine镜像。
+    image: redis:7.4.11-alpine
+
+    # 只将Redis发布到Windows本机，局域网中的其他电脑无法直接连接。
+    ports:
+
+      # Windows的6380转发到容器的6379。
+      - "127.0.0.1:${REDIS_PORT}:6379"
+
+    # 判断Redis是否已经可以响应命令。
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
 # 声明Compose管理的数据卷。
 volumes:
 

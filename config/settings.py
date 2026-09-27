@@ -148,3 +148,25 @@ REST_FRAMEWORK = {
     ),
     "PAGE_SIZE": 10,
 }
+
+
+# Cache
+# https://docs.djangoproject.com/en/5.2/topics/cache/
+
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = os.getenv("REDIS_PORT", "6380")
+REDIS_DB = os.getenv("REDIS_DB", "1")
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
+        "TIMEOUT": int(os.getenv("REDIS_CACHE_TIMEOUT", "300")),
+        "KEY_PREFIX": "pioms",
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "SOCKET_CONNECT_TIMEOUT": 5,
+            "SOCKET_TIMEOUT": 5,
+        },
+    }
+}
