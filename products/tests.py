@@ -2,14 +2,27 @@ import base64
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
+from django.test.utils import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from .cache import product_detail_cache_key
 from .models import Product
 
 
+TEST_CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "product-api-tests",
+        "TIMEOUT": 300,
+    }
+}
+
+
+@override_settings(CACHES=TEST_CACHES)
 class ProductAPITests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -55,6 +68,7 @@ class ProductAPITests(TestCase):
             )
 
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
         credentials = base64.b64encode(
             b"product-api-tester:test-password"
@@ -92,6 +106,30 @@ class ProductAPITests(TestCase):
         self.assertEqual(response.data["sku"], "PHONE-001")
         self.assertEqual(response.data["price"], "1999.00")
         self.assertEqual(response.data["stock"], 10)
+        self.assertEqual(response["X-Cache"], "MISS")
+
+    def test_product_detail_is_read_from_cache_after_first_request(self):
+        detail_url = reverse(
+            "products:product-detail",
+            args=[self.phone.id],
+        )
+
+        first_response = self.client.get(detail_url)
+        cached_data = cache.get(product_detail_cache_key(self.phone.id))
+
+        Product.objects.filter(pk=self.phone.id).update(name="数据库中的新名称")
+        second_response = self.client.get(detail_url)
+
+        self.assertEqual(first_response["X-Cache"], "MISS")
+        self.assertEqual(cached_data["name"], "测试手机")
+        self.assertEqual(second_response["X-Cache"], "HIT")
+        self.assertEqual(second_response.data["name"], "测试手机")
+
+        cache.delete(product_detail_cache_key(self.phone.id))
+        third_response = self.client.get(detail_url)
+
+        self.assertEqual(third_response["X-Cache"], "MISS")
+        self.assertEqual(third_response.data["name"], "数据库中的新名称")
 
     def test_missing_product_returns_404(self):
         response = self.client.get(

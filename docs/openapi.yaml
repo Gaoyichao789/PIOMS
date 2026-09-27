@@ -2,7 +2,7 @@ openapi: 3.0.3
 
 info:
   title: PIOMS 商品库存与订单管理系统 API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     当前文档描述商品查询和订单创建接口。
     订单价格、订单总额、订单号和下单用户均由服务端确定，客户端不能自行指定。
@@ -153,6 +153,14 @@ paths:
       responses:
         "200":
           description: 商品详情查询成功
+          headers:
+            X-Cache:
+              description: MISS 表示本次查询了 MySQL 并写入 Redis；HIT 表示直接从 Redis 返回。
+              schema:
+                type: string
+                enum:
+                  - HIT
+                  - MISS
           content:
             application/json:
               schema:

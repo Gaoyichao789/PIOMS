@@ -1,6 +1,9 @@
+from django.core.cache import cache
 from django.db.models import Q
 from rest_framework.generics import ListAPIView, RetrieveAPIView
+from rest_framework.response import Response
 
+from .cache import product_detail_cache_key
 from .models import Product
 from .serializers import ProductListQuerySerializer, ProductSerializer
 
@@ -43,3 +46,17 @@ class ProductListView(ListAPIView):
 class ProductDetailView(RetrieveAPIView):
     queryset = Product.objects.all()
     serializer_class = ProductSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        product_id = self.kwargs[self.lookup_field]
+        cache_key = product_detail_cache_key(product_id)
+        cached_data = cache.get(cache_key)
+
+        if cached_data is not None:
+            return Response(cached_data, headers={"X-Cache": "HIT"})
+
+        product = self.get_object()
+        product_data = dict(self.get_serializer(product).data)
+        cache.set(cache_key, product_data)
+
+        return Response(product_data, headers={"X-Cache": "MISS"})
