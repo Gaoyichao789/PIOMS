@@ -2,9 +2,9 @@ openapi: 3.0.3
 
 info:
   title: PIOMS 商品库存与订单管理系统 API
-  version: 1.0.0
+  version: 1.1.0
   description: |
-    当前文档描述订单创建接口。
+    当前文档描述商品查询和订单创建接口。
     订单价格、订单总额、订单号和下单用户均由服务端确定，客户端不能自行指定。
 
 servers:
@@ -12,10 +12,173 @@ servers:
     description: 本地 Django 开发服务器
 
 tags:
+  - name: Products
+    description: 商品查询接口
   - name: Orders
     description: 订单接口
 
 paths:
+  /api/products/:
+    get:
+      tags:
+        - Products
+      summary: 查询商品列表
+      description: |
+        返回经过分页的商品列表。可以按商品名称或 SKU 搜索，按库存状态和价格区间筛选，并选择排序方式。
+        多个 Query 参数可以组合使用；所有筛选均由 MySQL 完成。
+      operationId: listProducts
+      security:
+        - basicAuth: []
+        - sessionCookie: []
+      parameters:
+        - name: search
+          in: query
+          required: false
+          description: 在商品名称和 SKU 中进行不区分大小写的包含搜索。
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+          example: 手机
+        - name: in_stock
+          in: query
+          required: false
+          description: true 表示只查库存大于 0 的商品，false 表示只查库存等于 0 的商品。
+          schema:
+            type: boolean
+          example: true
+        - name: min_price
+          in: query
+          required: false
+          description: 最低价格，包含该价格。
+          schema:
+            type: number
+            format: decimal
+            minimum: 0
+          example: 1000.00
+        - name: max_price
+          in: query
+          required: false
+          description: 最高价格，包含该价格，且不能低于 min_price。
+          schema:
+            type: number
+            format: decimal
+            minimum: 0
+          example: 3000.00
+        - name: ordering
+          in: query
+          required: false
+          description: 排序字段；字段名前的减号表示倒序。默认按照创建时间倒序。
+          schema:
+            type: string
+            default: -created_at
+            enum:
+              - price
+              - -price
+              - sales
+              - -sales
+              - name
+              - -name
+              - created_at
+              - -created_at
+          example: -sales
+        - name: page
+          in: query
+          required: false
+          description: 页码，从 1 开始，每页 10 条。
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+      responses:
+        "200":
+          description: 商品列表查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedProductList"
+              example:
+                count: 1
+                next: null
+                previous: null
+                results:
+                  - id: 3
+                    sku: PHONE-001
+                    name: 测试手机
+                    price: "1999.00"
+                    stock: 9
+                    sales: 1
+        "400":
+          description: 筛选或排序参数不合法
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+              example:
+                max_price:
+                  - 最高价格不能低于最低价格。
+        "401":
+          description: 未提供认证信息，或者 Basic Auth 用户名、密码错误
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailError"
+        "404":
+          description: 请求的页码不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailError"
+
+  /api/products/{id}/:
+    get:
+      tags:
+        - Products
+      summary: 查询商品详情
+      description: 根据商品数据库主键返回一个商品对象。
+      operationId: retrieveProduct
+      security:
+        - basicAuth: []
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: products_product 表中的商品主键 ID。
+          schema:
+            type: integer
+            minimum: 1
+          example: 3
+      responses:
+        "200":
+          description: 商品详情查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+              example:
+                id: 3
+                sku: PHONE-001
+                name: 测试手机
+                price: "1999.00"
+                stock: 9
+                sales: 1
+        "401":
+          description: 未提供认证信息，或者 Basic Auth 用户名、密码错误
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailError"
+        "404":
+          description: 商品不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailError"
+              example:
+                detail: 未找到。
+
   /api/orders/:
     post:
       tags:
@@ -138,6 +301,71 @@ components:
       description: 使用 Session 认证发送 POST 时必须提供，与 csrftoken Cookie 的值一致。
 
   schemas:
+    Product:
+      type: object
+      required:
+        - id
+        - sku
+        - name
+        - price
+        - stock
+        - sales
+      properties:
+        id:
+          type: integer
+          readOnly: true
+          description: 商品数据库主键。
+        sku:
+          type: string
+          readOnly: true
+          description: 商品的唯一库存单位编码。
+        name:
+          type: string
+          readOnly: true
+          description: 商品名称。
+        price:
+          type: string
+          pattern: "^-?[0-9]+\\.[0-9]{2}$"
+          readOnly: true
+          description: 商品当前价格。
+        stock:
+          type: integer
+          minimum: 0
+          readOnly: true
+          description: MySQL 中记录的当前库存。
+        sales:
+          type: integer
+          minimum: 0
+          readOnly: true
+          description: 累计销量。
+
+    PaginatedProductList:
+      type: object
+      required:
+        - count
+        - next
+        - previous
+        - results
+      properties:
+        count:
+          type: integer
+          minimum: 0
+          description: 符合筛选条件的商品总数。
+        next:
+          type: string
+          format: uri
+          nullable: true
+          description: 下一页地址；没有下一页时为 null。
+        previous:
+          type: string
+          format: uri
+          nullable: true
+          description: 上一页地址；没有上一页时为 null。
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/Product"
+
     OrderCreateRequest:
       type: object
       required:
