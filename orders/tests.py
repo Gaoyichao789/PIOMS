@@ -1,8 +1,12 @@
+import base64
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.test import TestCase
+from django.urls import reverse
+from rest_framework import status
+from rest_framework.test import APIClient
 
 from products.models import Product
 
@@ -154,3 +158,125 @@ class CreateOrderTests(TestCase):
             )
 
         self.assertEqual(Order.objects.count(), 0)
+
+
+class OrderCreateAPITests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            username="api-order-tester",
+            password="test-password",
+        )
+        cls.product = Product.objects.create(
+            sku="API-PHONE-TEST",
+            name="API 测试手机",
+            price=Decimal("999.00"),
+            stock=5,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.url = reverse("orders:order-create")
+
+    def test_unauthenticated_user_cannot_create_order(self):
+        response = self.client.post(
+            self.url,
+            {
+                "items": [
+                    {"product_id": self.product.id, "quantity": 1},
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_basic_authenticated_user_can_create_order(self):
+        credentials = base64.b64encode(
+            b"api-order-tester:test-password"
+        ).decode("ascii")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Basic {credentials}")
+
+        response = self.client.post(
+            self.url,
+            {
+                "items": [
+                    {"product_id": self.product.id, "quantity": 2},
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["status"], OrderStatus.PENDING)
+        self.assertEqual(response.data["total_amount"], "1998.00")
+        self.assertEqual(len(response.data["items"]), 1)
+        self.assertEqual(response.data["items"][0]["product_id"], self.product.id)
+        self.assertEqual(response.data["items"][0]["product_name"], self.product.name)
+        self.assertEqual(response.data["items"][0]["quantity"], 2)
+
+        order = Order.objects.get(pk=response.data["id"])
+        self.assertEqual(order.user, self.user)
+        self.product.refresh_from_db()
+        self.assertEqual((self.product.stock, self.product.sales), (3, 2))
+
+    def test_invalid_quantity_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.url,
+            {
+                "items": [
+                    {"product_id": self.product.id, "quantity": 0},
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("quantity", response.data["items"][0])
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_missing_product_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        missing_id = self.product.id + 1000
+
+        response = self.client.post(
+            self.url,
+            {
+                "items": [
+                    {"product_id": missing_id, "quantity": 1},
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "product_not_found")
+        self.assertEqual(list(response.data["product_ids"]), [missing_id])
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_insufficient_stock_returns_409_without_changes(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.url,
+            {
+                "items": [
+                    {"product_id": self.product.id, "quantity": 6},
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "insufficient_stock")
+        self.assertEqual(response.data["product_id"], self.product.id)
+        self.assertEqual(response.data["requested"], 6)
+        self.assertEqual(response.data["available"], 5)
+        self.assertEqual(Order.objects.count(), 0)
+
+        self.product.refresh_from_db()
+        self.assertEqual((self.product.stock, self.product.sales), (5, 0))
+        self.assertEqual(OrderItem.objects.count(), 0)

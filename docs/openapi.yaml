@@ -1,0 +1,289 @@
+openapi: 3.0.3
+
+info:
+  title: PIOMS 商品库存与订单管理系统 API
+  version: 1.0.0
+  description: |
+    当前文档描述订单创建接口。
+    订单价格、订单总额、订单号和下单用户均由服务端确定，客户端不能自行指定。
+
+servers:
+  - url: http://127.0.0.1:8000
+    description: 本地 Django 开发服务器
+
+tags:
+  - name: Orders
+    description: 订单接口
+
+paths:
+  /api/orders/:
+    post:
+      tags:
+        - Orders
+      summary: 创建订单
+      description: |
+        使用当前认证用户创建一张订单，并在同一个 MySQL 事务中创建订单明细、扣减库存和增加销量。
+        同一商品出现多次时，服务端会先合并数量。任一商品不存在或库存不足时，整笔操作失败并回滚。
+      operationId: createOrder
+      security:
+        - basicAuth: []
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderCreateRequest"
+            examples:
+              oneProduct:
+                summary: 购买一种商品
+                value:
+                  items:
+                    - product_id: 3
+                      quantity: 1
+              multipleProducts:
+                summary: 购买多种商品
+                value:
+                  items:
+                    - product_id: 3
+                      quantity: 2
+                    - product_id: 4
+                      quantity: 1
+      responses:
+        "201":
+          description: 订单创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+              example:
+                id: 1
+                order_no: ORD20260926A2CB14559E7D47AC86F2
+                status: pending
+                total_amount: "1999.00"
+                items:
+                  - product_id: 3
+                    product_name: 测试手机
+                    quantity: 1
+                    unit_price: "1999.00"
+                    subtotal: "1999.00"
+                created_at: "2026-09-26T20:08:00+08:00"
+        "400":
+          description: JSON 格式错误、字段校验失败或商品不存在
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ValidationError"
+                  - $ref: "#/components/schemas/ProductNotFoundError"
+              examples:
+                invalidQuantity:
+                  summary: 数量不是正整数
+                  value:
+                    items:
+                      - quantity:
+                          - 请确保该值大于或者等于 1。
+                productNotFound:
+                  summary: 商品不存在
+                  value:
+                    code: product_not_found
+                    detail: 商品不存在：999
+                    product_ids:
+                      - 999
+        "401":
+          description: 未提供认证信息，或者 Basic Auth 用户名、密码错误
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailError"
+              example:
+                detail: 身份认证信息未提供。
+        "409":
+          description: 商品库存不足，订单和库存修改均会回滚
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsufficientStockError"
+              example:
+                code: insufficient_stock
+                detail: 商品 3 库存不足：需要 20，当前库存 10
+                product_id: 3
+                requested: 20
+                available: 10
+        "405":
+          description: 使用了 POST 以外的请求方法
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailError"
+
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: |
+        Apifox 本地调试推荐方式。用户名和密码使用 Django 用户账号。
+        Basic Auth 只进行 Base64 编码，并非加密；正式环境必须使用 HTTPS。
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: sessionid
+      description: 浏览器通过 /api-auth/login/ 登录后取得的 Django Session Cookie。
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRFToken
+      description: 使用 Session 认证发送 POST 时必须提供，与 csrftoken Cookie 的值一致。
+
+  schemas:
+    OrderCreateRequest:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          minItems: 1
+          description: 要购买的商品明细，至少包含一项。
+          items:
+            $ref: "#/components/schemas/OrderItemCreate"
+
+    OrderItemCreate:
+      type: object
+      required:
+        - product_id
+        - quantity
+      properties:
+        product_id:
+          type: integer
+          minimum: 1
+          description: products_product 表中商品的主键 ID。
+          example: 3
+        quantity:
+          type: integer
+          minimum: 1
+          description: 购买数量，必须是正整数。
+          example: 1
+
+    Order:
+      type: object
+      required:
+        - id
+        - order_no
+        - status
+        - total_amount
+        - items
+        - created_at
+      properties:
+        id:
+          type: integer
+          readOnly: true
+          description: 订单数据库主键。
+        order_no:
+          type: string
+          readOnly: true
+          description: 服务端生成的唯一订单号。
+        status:
+          type: string
+          enum:
+            - pending
+          readOnly: true
+          description: 新订单的初始状态为 pending（待处理）。
+        total_amount:
+          type: string
+          pattern: "^-?[0-9]+\\.[0-9]{2}$"
+          readOnly: true
+          description: 服务端根据数据库商品价格计算的订单总额。
+        items:
+          type: array
+          readOnly: true
+          items:
+            $ref: "#/components/schemas/OrderItem"
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    OrderItem:
+      type: object
+      required:
+        - product_id
+        - product_name
+        - quantity
+        - unit_price
+        - subtotal
+      properties:
+        product_id:
+          type: integer
+          readOnly: true
+        product_name:
+          type: string
+          readOnly: true
+        quantity:
+          type: integer
+          readOnly: true
+        unit_price:
+          type: string
+          pattern: "^-?[0-9]+\\.[0-9]{2}$"
+          readOnly: true
+          description: 下单时的商品价格快照。
+        subtotal:
+          type: string
+          pattern: "^-?[0-9]+\\.[0-9]{2}$"
+          readOnly: true
+          description: unit_price 乘以 quantity。
+
+    ValidationError:
+      type: object
+      description: DRF Serializer 返回的字段校验错误。
+      additionalProperties: true
+
+    ProductNotFoundError:
+      type: object
+      required:
+        - code
+        - detail
+        - product_ids
+      properties:
+        code:
+          type: string
+          enum:
+            - product_not_found
+        detail:
+          type: string
+        product_ids:
+          type: array
+          items:
+            type: integer
+
+    InsufficientStockError:
+      type: object
+      required:
+        - code
+        - detail
+        - product_id
+        - requested
+        - available
+      properties:
+        code:
+          type: string
+          enum:
+            - insufficient_stock
+        detail:
+          type: string
+        product_id:
+          type: integer
+        requested:
+          type: integer
+        available:
+          type: integer
+
+    DetailError:
+      type: object
+      required:
+        - detail
+      properties:
+        detail:
+          type: string
