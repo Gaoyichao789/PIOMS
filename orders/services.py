@@ -6,6 +6,7 @@ from typing import Any
 from django.db import transaction
 from django.utils import timezone
 
+from products.cache import delete_product_detail_caches
 from products.models import Product
 
 from .exceptions import (
@@ -125,5 +126,11 @@ def create_order(*, user, items):
         product.updated_at = updated_at
 
     Product.objects.bulk_update(products, ["stock", "sales", "updated_at"])
+
+    cache_product_ids = tuple(product_ids)
+    transaction.on_commit(
+        lambda: delete_product_detail_caches(cache_product_ids),
+        robust=True,
+    )
 
     return order

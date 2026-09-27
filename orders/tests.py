@@ -3,11 +3,14 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache
 from django.test import TestCase
+from django.test.utils import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from products.cache import product_detail_cache_key
 from products.models import Product
 
 from .exceptions import (
@@ -21,6 +24,15 @@ from .models import Order, OrderItem, OrderStatus
 from .services import create_order
 
 
+TEST_CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "orders-tests",
+    }
+}
+
+
+@override_settings(CACHES=TEST_CACHES)
 class CreateOrderTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -40,6 +52,9 @@ class CreateOrderTests(TestCase):
             price=Decimal("29.90"),
             stock=5,
         )
+
+    def setUp(self):
+        cache.clear()
 
     def test_create_order_creates_items_and_updates_inventory(self):
         order = create_order(
@@ -158,6 +173,46 @@ class CreateOrderTests(TestCase):
             )
 
         self.assertEqual(Order.objects.count(), 0)
+
+    def test_successful_order_deletes_related_product_caches_after_commit(self):
+        phone_cache_key = product_detail_cache_key(self.phone.id)
+        case_cache_key = product_detail_cache_key(self.case.id)
+        unrelated_cache_key = product_detail_cache_key(999999)
+        cache.set(phone_cache_key, {"stock": 10})
+        cache.set(case_cache_key, {"stock": 5})
+        cache.set(unrelated_cache_key, {"stock": 99})
+
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            create_order(
+                user=self.user,
+                items=[
+                    {"product_id": self.phone.id, "quantity": 1},
+                    {"product_id": self.case.id, "quantity": 1},
+                ],
+            )
+
+        self.assertEqual(len(callbacks), 1)
+        self.assertIsNone(cache.get(phone_cache_key))
+        self.assertIsNone(cache.get(case_cache_key))
+        self.assertEqual(cache.get(unrelated_cache_key), {"stock": 99})
+
+    def test_failed_order_keeps_product_cache(self):
+        phone_cache_key = product_detail_cache_key(self.phone.id)
+        cached_phone = {"stock": 10}
+        cache.set(phone_cache_key, cached_phone)
+
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            with self.assertRaises(InsufficientStockError):
+                create_order(
+                    user=self.user,
+                    items=[
+                        {"product_id": self.phone.id, "quantity": 1},
+                        {"product_id": self.case.id, "quantity": 6},
+                    ],
+                )
+
+        self.assertEqual(len(callbacks), 0)
+        self.assertEqual(cache.get(phone_cache_key), cached_phone)
 
 
 class OrderCreateAPITests(TestCase):
