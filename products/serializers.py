@@ -19,6 +19,10 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class ProductStockInSerializer(serializers.Serializer):
+    quantity = serializers.IntegerField(min_value=1)
+
+
 class ProductListQuerySerializer(serializers.Serializer):
     search = serializers.CharField(
         required=False,

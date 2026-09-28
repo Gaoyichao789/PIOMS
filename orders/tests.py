@@ -1,10 +1,13 @@
 import base64
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
-from django.test import TestCase
+from django.db import close_old_connections
+from django.test import TestCase, TransactionTestCase
 from django.test.utils import override_settings
 from django.urls import reverse
 from rest_framework import status
@@ -18,10 +21,12 @@ from .exceptions import (
     InsufficientStockError,
     InvalidOrderItemError,
     InvalidOrderUserError,
+    OrderNotCancellableError,
+    OrderNotFoundError,
     ProductNotFoundError,
 )
 from .models import Order, OrderItem, OrderStatus
-from .services import create_order
+from .services import cancel_order, create_order
 
 
 TEST_CACHES = {
@@ -214,6 +219,49 @@ class CreateOrderTests(TestCase):
         self.assertEqual(len(callbacks), 0)
         self.assertEqual(cache.get(phone_cache_key), cached_phone)
 
+    def test_cancel_order_restores_inventory_and_deletes_cache_after_commit(self):
+        order = create_order(
+            user=self.user,
+            items=[{"product_id": self.phone.id, "quantity": 2}],
+        )
+        cache_key = product_detail_cache_key(self.phone.id)
+        cache.set(cache_key, {"stock": 8, "sales": 2})
+
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            cancelled_order = cancel_order(user=self.user, order_id=order.id)
+
+        cancelled_order.refresh_from_db()
+        self.phone.refresh_from_db()
+        self.assertEqual(cancelled_order.status, OrderStatus.CANCELLED)
+        self.assertEqual((self.phone.stock, self.phone.sales), (10, 0))
+        self.assertEqual(len(callbacks), 1)
+        self.assertIsNone(cache.get(cache_key))
+
+    def test_non_pending_order_cannot_be_cancelled(self):
+        order = Order.objects.create(
+            order_no="PAID-ORDER",
+            user=self.user,
+            status=OrderStatus.PAID,
+            total_amount=Decimal("0.00"),
+        )
+
+        with self.assertRaises(OrderNotCancellableError) as context:
+            cancel_order(user=self.user, order_id=order.id)
+
+        self.assertEqual(context.exception.current_status, OrderStatus.PAID)
+
+    def test_user_cannot_cancel_another_users_order(self):
+        other_user = get_user_model().objects.create_user(username="other-user")
+        order = Order.objects.create(
+            order_no="OTHER-USERS-ORDER",
+            user=self.user,
+            status=OrderStatus.PENDING,
+            total_amount=Decimal("0.00"),
+        )
+
+        with self.assertRaises(OrderNotFoundError):
+            cancel_order(user=other_user, order_id=order.id)
+
 
 class OrderCreateAPITests(TestCase):
     @classmethod
@@ -231,7 +279,7 @@ class OrderCreateAPITests(TestCase):
 
     def setUp(self):
         self.client = APIClient()
-        self.url = reverse("orders:order-create")
+        self.url = reverse("orders:order-list-create")
 
     def test_unauthenticated_user_cannot_create_order(self):
         response = self.client.post(
@@ -335,3 +383,185 @@ class OrderCreateAPITests(TestCase):
         self.product.refresh_from_db()
         self.assertEqual((self.product.stock, self.product.sales), (5, 0))
         self.assertEqual(OrderItem.objects.count(), 0)
+
+
+@override_settings(CACHES=TEST_CACHES)
+class OrderReadCancelAPITests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        user_model = get_user_model()
+        cls.user = user_model.objects.create_user(
+            username="order-reader",
+            password="test-password",
+        )
+        cls.other_user = user_model.objects.create_user(
+            username="another-order-reader",
+            password="test-password",
+        )
+        cls.product = Product.objects.create(
+            sku="ORDER-READ-PRODUCT",
+            name="订单查询测试商品",
+            price=Decimal("100.00"),
+            stock=20,
+            sales=12,
+        )
+
+        cls.orders = []
+        for index in range(12):
+            order = Order.objects.create(
+                order_no=f"READ-ORDER-{index:02d}",
+                user=cls.user,
+                status=OrderStatus.PENDING,
+                total_amount=Decimal("100.00"),
+            )
+            OrderItem.objects.create(
+                order=order,
+                product=cls.product,
+                quantity=1,
+                unit_price=Decimal("100.00"),
+                subtotal=Decimal("100.00"),
+            )
+            cls.orders.append(order)
+
+        cls.other_order = Order.objects.create(
+            order_no="ANOTHER-USERS-ORDER",
+            user=cls.other_user,
+            status=OrderStatus.PENDING,
+            total_amount=Decimal("100.00"),
+        )
+        OrderItem.objects.create(
+            order=cls.other_order,
+            product=cls.product,
+            quantity=1,
+            unit_price=Decimal("100.00"),
+            subtotal=Decimal("100.00"),
+        )
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.list_url = reverse("orders:order-list-create")
+
+    def test_order_list_is_paginated_and_only_contains_current_users_orders(self):
+        response = self.client.get(self.list_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 12)
+        self.assertEqual(len(response.data["results"]), 10)
+        returned_ids = {order["id"] for order in response.data["results"]}
+        self.assertNotIn(self.other_order.id, returned_ids)
+
+    def test_order_list_uses_fixed_number_of_queries(self):
+        with self.assertNumQueries(3):
+            response = self.client.get(self.list_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["results"]), 10)
+
+    def test_order_detail_contains_items(self):
+        order = self.orders[0]
+        response = self.client.get(
+            reverse("orders:order-detail", args=[order.id])
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], order.id)
+        self.assertEqual(len(response.data["items"]), 1)
+        self.assertEqual(
+            response.data["items"][0]["product_name"],
+            self.product.name,
+        )
+
+    def test_another_users_order_detail_returns_404(self):
+        response = self.client.get(
+            reverse("orders:order-detail", args=[self.other_order.id])
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cancel_order_restores_inventory_and_cannot_be_repeated(self):
+        order = self.orders[0]
+        cache_key = product_detail_cache_key(self.product.id)
+        cache.set(cache_key, {"stock": 20, "sales": 12})
+        cancel_url = reverse("orders:order-cancel", args=[order.id])
+
+        with self.captureOnCommitCallbacks(execute=True):
+            first_response = self.client.post(cancel_url)
+        second_response = self.client.post(cancel_url)
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data["status"], OrderStatus.CANCELLED)
+        self.assertIsNone(cache.get(cache_key))
+
+        self.product.refresh_from_db()
+        self.assertEqual((self.product.stock, self.product.sales), (21, 11))
+
+        self.assertEqual(second_response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(second_response.data["code"], "order_not_cancellable")
+        self.product.refresh_from_db()
+        self.assertEqual((self.product.stock, self.product.sales), (21, 11))
+
+    def test_cannot_cancel_another_users_order(self):
+        response = self.client.post(
+            reverse("orders:order-cancel", args=[self.other_order.id])
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data["code"], "order_not_found")
+
+    def test_unauthenticated_user_cannot_list_orders(self):
+        response = APIClient().get(self.list_url)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+@override_settings(CACHES=TEST_CACHES)
+class OrderConcurrencyTests(TransactionTestCase):
+    def setUp(self):
+        cache.clear()
+        user_model = get_user_model()
+        self.first_user = user_model.objects.create_user(username="buyer-one")
+        self.second_user = user_model.objects.create_user(username="buyer-two")
+        self.product = Product.objects.create(
+            sku="LAST-ONE",
+            name="最后一件并发测试商品",
+            price=Decimal("100.00"),
+            stock=1,
+        )
+        self.start_barrier = threading.Barrier(2)
+
+    def _try_to_buy_last_product(self, user_id):
+        close_old_connections()
+        try:
+            user = get_user_model().objects.get(pk=user_id)
+            self.start_barrier.wait(timeout=5)
+
+            try:
+                order = create_order(
+                    user=user,
+                    items=[{"product_id": self.product.id, "quantity": 1}],
+                )
+            except InsufficientStockError:
+                return "insufficient_stock", None
+
+            return "created", order.id
+        finally:
+            close_old_connections()
+
+    def test_two_users_competing_for_last_product_create_only_one_order(self):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(
+                executor.map(
+                    self._try_to_buy_last_product,
+                    (self.first_user.id, self.second_user.id),
+                )
+            )
+
+        outcomes = [outcome for outcome, _ in results]
+        self.assertCountEqual(outcomes, ["created", "insufficient_stock"])
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(OrderItem.objects.count(), 1)
+
+        self.product.refresh_from_db()
+        self.assertEqual((self.product.stock, self.product.sales), (0, 1))

@@ -34,3 +34,18 @@ class InsufficientStockError(OrderServiceError):
         super().__init__(
             f"商品 {product_id} 库存不足：需要 {requested}，当前库存 {available}"
         )
+
+
+class OrderNotFoundError(OrderServiceError):
+    def __init__(self, order_id):
+        self.order_id = order_id
+        super().__init__(f"订单不存在：{order_id}")
+
+
+class OrderNotCancellableError(OrderServiceError):
+    def __init__(self, *, order_id, current_status):
+        self.order_id = order_id
+        self.current_status = current_status
+        super().__init__(
+            f"订单 {order_id} 当前状态为 {current_status}，不能取消"
+        )

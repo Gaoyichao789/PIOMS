@@ -14,6 +14,8 @@ from .exceptions import (
     InsufficientStockError,
     InvalidOrderItemError,
     InvalidOrderUserError,
+    OrderNotCancellableError,
+    OrderNotFoundError,
     ProductNotFoundError,
 )
 from .models import Order, OrderItem, OrderStatus
@@ -126,6 +128,60 @@ def create_order(*, user, items):
         product.updated_at = updated_at
 
     Product.objects.bulk_update(products, ["stock", "sales", "updated_at"])
+
+    cache_product_ids = tuple(product_ids)
+    transaction.on_commit(
+        lambda: delete_product_detail_caches(cache_product_ids),
+        robust=True,
+    )
+
+    return order
+
+
+@transaction.atomic
+def cancel_order(*, user, order_id):
+    if (
+        not getattr(user, "is_authenticated", False)
+        or getattr(user, "pk", None) is None
+    ):
+        raise InvalidOrderUserError()
+
+    try:
+        order = Order.objects.select_for_update().get(
+            pk=order_id,
+            user=user,
+        )
+    except Order.DoesNotExist as exc:
+        raise OrderNotFoundError(order_id) from exc
+
+    if order.status != OrderStatus.PENDING:
+        raise OrderNotCancellableError(
+            order_id=order.pk,
+            current_status=order.status,
+        )
+
+    items = list(order.items.all().order_by("product_id"))
+    quantities_by_product_id = {
+        item.product_id: item.quantity for item in items
+    }
+    product_ids = sorted(quantities_by_product_id)
+    products = list(
+        Product.objects.select_for_update()
+        .filter(pk__in=product_ids)
+        .order_by("pk")
+    )
+
+    updated_at = timezone.now()
+    for product in products:
+        quantity = quantities_by_product_id[product.pk]
+        product.stock += quantity
+        product.sales -= quantity
+        product.updated_at = updated_at
+
+    Product.objects.bulk_update(products, ["stock", "sales", "updated_at"])
+
+    order.status = OrderStatus.CANCELLED
+    order.save(update_fields=["status", "updated_at"])
 
     cache_product_ids = tuple(product_ids)
     transaction.on_commit(

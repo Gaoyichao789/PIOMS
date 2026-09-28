@@ -1,11 +1,18 @@
 from django.core.cache import cache
 from django.db.models import Q
-from rest_framework.generics import ListAPIView, RetrieveAPIView
+from rest_framework import status
+from rest_framework.generics import GenericAPIView, ListAPIView, RetrieveAPIView
+from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
 from .cache import product_detail_cache_key
 from .models import Product
-from .serializers import ProductListQuerySerializer, ProductSerializer
+from .serializers import (
+    ProductListQuerySerializer,
+    ProductSerializer,
+    ProductStockInSerializer,
+)
+from .services import stock_in_product
 
 
 class ProductListView(ListAPIView):
@@ -60,3 +67,25 @@ class ProductDetailView(RetrieveAPIView):
         cache.set(cache_key, product_data)
 
         return Response(product_data, headers={"X-Cache": "MISS"})
+
+
+class ProductStockInView(GenericAPIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = ProductStockInSerializer
+
+    def post(self, request, pk):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            product = stock_in_product(
+                product_id=pk,
+                quantity=serializer.validated_data["quantity"],
+            )
+        except Product.DoesNotExist:
+            return Response(
+                {"detail": "商品不存在。"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(ProductSerializer(product).data)

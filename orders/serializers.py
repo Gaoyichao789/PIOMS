@@ -38,4 +38,5 @@ class OrderSerializer(serializers.ModelSerializer):
             "total_amount",
             "items",
             "created_at",
+            "updated_at",
         )

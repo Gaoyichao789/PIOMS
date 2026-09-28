@@ -14,6 +14,9 @@ class Product(models.Model):
         verbose_name = "商品"
         verbose_name_plural = "商品"
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["price"], name="product_price_idx"),
+        ]
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(price__gte=0),
